@@ -42,7 +42,7 @@ producer = KafkaProducer(
 
 w3 = Web3(WebsocketProvider(ETH_WS))
 
-ALERT_VALUE = 100 * 1e18  # 100 ETH
+ALERT_VALUE = 500 * 1e18  # 100 ETH
 
 def fetch_block_with_retry(number, retries=3, delay=1):
     for _ in range(retries):
@@ -169,7 +169,7 @@ async def monitor_api(params: MonitorInput):
                                     "block": blk.number,
                                     "goplus_result": result_goplus
                                 }, to_email)
-                            time.sleep(0.1)
+                            #time.sleep(0.1)
                         except Exception as e:
                             print("GoPlus API 检查异常:", e)
 
