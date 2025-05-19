@@ -41,7 +41,7 @@ producer = KafkaProducer(
     retries=5
 )
 
-ETH_WS = os.getenv("ETH_WS", "wss://eth-mainnet.g.alchemy.com/v2/X4bmm7I5BQeOpOFIKhVDPQzfWcgOoJ18")
+#ETH_WS = os.getenv("ETH_WS", "wss://eth-mainnet.g.alchemy.com/v2/X4bmm7I5BQeOpOFIKhVDPQzfWcgOoJ18")
 w3 = Web3(WebsocketProvider(ETH_WS))
 
 ALERT_VALUE = 100 * 1e18  # 100 ETH
@@ -174,14 +174,14 @@ async def monitor_api(params: MonitorInput):
                             print("GoPlus API 检查异常:", e)
 
                         tx_detail = {
-                            "hash": tx_hash,
-                            "from": from_addr,
-                            "to": to_addr if to_addr else None,
+                            "hash": compact(tx_hash),
+                            "from": compact(from_addr),
+                            "to": compact(to_addr if to_addr else None),
                             "value": tx.value,
                             "gas": tx.gas,
                             "gasPrice": tx.gasPrice,
                             "nonce": tx.nonce,
-                            "input": input_data
+                            "input": compact(input_data)
                         }
                         if mode == "tx" and tx_collected < target_count:
                             block_map[block_number]["txs"].append(tx_detail)
