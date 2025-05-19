@@ -16,7 +16,6 @@ from email.mime.text import MIMEText
 from goplus.address import Address
 from dotenv import load_dotenv
 import uuid
-from collections import defaultdict
 
 load_dotenv()
 
@@ -41,7 +40,6 @@ producer = KafkaProducer(
     retries=5
 )
 
-#ETH_WS = os.getenv("ETH_WS", "wss://eth-mainnet.g.alchemy.com/v2/X4bmm7I5BQeOpOFIKhVDPQzfWcgOoJ18")
 w3 = Web3(WebsocketProvider(ETH_WS))
 
 ALERT_VALUE = 100 * 1e18  # 100 ETH
@@ -173,28 +171,39 @@ async def monitor_api(params: MonitorInput):
                         except Exception as e:
                             print("GoPlus API 检查异常:", e)
 
-                        tx_detail = {
+                        # 1. 原始交易数据（不做compact），用于保存到下载文件
+                        tx_detail_raw = {
+                            "hash": tx_hash,
+                            "from": from_addr,
+                            "to": to_addr if to_addr else None,
+                            "value": tx.value,
+                            "gas": tx.gas,
+                            "gasPrice": tx.gasPrice,
+                            "nonce": tx.nonce,
+                            "input": input_data
+                        }
+                        # 2. 精简版交易数据（compact），用于API返回的preview
+                        tx_detail_preview = {
                             "hash": compact(tx_hash),
                             "from": compact(from_addr),
-                            "to": compact(to_addr if to_addr else None),
+                            "to": compact(to_addr) if to_addr else None,
                             "value": tx.value,
                             "gas": tx.gas,
                             "gasPrice": tx.gasPrice,
                             "nonce": tx.nonce,
                             "input": compact(input_data)
                         }
+
                         if mode == "tx" and tx_collected < target_count:
-                            block_map[block_number]["txs"].append(tx_detail)
+                            block_map[block_number]["txs"].append(tx_detail_raw)
                             if len(preview_items) < 10:
-                                # 预览数据加区块信息
                                 preview_items.append({
                                     "number": block_number,
                                     "timestamp": block_time,
-                                    "tx": tx_detail
+                                    "tx": tx_detail_preview
                                 })
                             tx_collected += 1
                             if tx_collected >= target_count:
-                                # 组装下载文件
                                 result_blocks = [block_map[bnum] for bnum in sorted(block_map.keys())]
                                 filename = f"monitor_{int(time.time())}_{uuid.uuid4().hex}.json"
                                 filepath = f"/tmp/{filename}"
@@ -208,15 +217,28 @@ async def monitor_api(params: MonitorInput):
                                     "download_url": download_url
                                 }
                         elif mode == "block":
-                            block_map[block_number]["txs"].append(tx_detail)
+                            block_map[block_number]["txs"].append(tx_detail_raw)
 
                     if mode == "block" and len(block_map[block_number]["txs"]) > 0:
                         if block_number not in [blk['number'] for blk in preview_items]:
                             # 每个区块只预览一次，展示区块基本信息和前10条tx
+                            # 这里preview只compact前10条
                             preview_block = {
                                 "number": block_number,
                                 "timestamp": block_time,
-                                "txs": block_map[block_number]["txs"][:10]
+                                "txs": [
+                                    {
+                                        "hash": compact(tx["hash"]),
+                                        "from": compact(tx["from"]),
+                                        "to": compact(tx["to"]) if tx["to"] else None,
+                                        "value": tx["value"],
+                                        "gas": tx["gas"],
+                                        "gasPrice": tx["gasPrice"],
+                                        "nonce": tx["nonce"],
+                                        "input": compact(tx["input"])
+                                    }
+                                    for tx in block_map[block_number]["txs"][:10]
+                                ]
                             }
                             preview_items.append(preview_block)
                         block_collected = len(block_map)
