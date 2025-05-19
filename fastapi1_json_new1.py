@@ -94,19 +94,14 @@ class MonitorInput(BaseModel):
 
 @app.post("/monitor")
 async def monitor_api(params: MonitorInput):
-    """
-    FastAPI接口，输入参数采集区块/交易，返回前10条数据及json下载链接
-    """
     mode = params.mode
     target_count = params.target_count
     to_email = params.to_email
 
     tx_collected = 0
     block_collected = 0
-    block_map = {}  # 区块号 -> 区块信息
 
-    # 用于预览（前10条）
-    preview_items = []
+    result_block = None
 
     async with websockets.connect(ETH_WS, ping_interval=20, ping_timeout=10) as ws:
         await ws.send(json.dumps({
@@ -128,14 +123,12 @@ async def monitor_api(params: MonitorInput):
                 num = int(result["number"], 16)
                 blk = fetch_block_with_retry(num)
                 if blk:
-                    block_number = blk.number
-                    block_time = to_beijing_time(blk.timestamp)
-                    if block_number not in block_map:
-                        block_map[block_number] = {
-                            "number": block_number,
-                            "timestamp": block_time,
-                            "txs": []
-                        }
+                    block_data = {
+                        "number": blk.number,
+                        "timestamp": to_beijing_time(blk.timestamp),
+                        "tx_count": len(blk.transactions),
+                        "txs": []
+                    }
                     for tx in blk.transactions:
                         tx_hash = tx.hash.hex()
                         from_addr = tx['from'].lower()
@@ -143,7 +136,7 @@ async def monitor_api(params: MonitorInput):
                         input_data = tx.input.hex() if hasattr(tx.input, 'hex') else str(tx.input)
                         value_eth = tx.value / 1e18
 
-                        # 风控1: 大额转账报警
+                        # 风控
                         if tx.value > ALERT_VALUE:
                             send_alert({
                                 "type": "large_transfer",
@@ -151,10 +144,9 @@ async def monitor_api(params: MonitorInput):
                                 "from": from_addr,
                                 "to": to_addr,
                                 "value": value_eth,
-                                "block": block_number
+                                "block": blk.number
                             }, to_email)
 
-                        # 风控2: GoPlus黑名单
                         try:
                             data = Address(access_token=None).address_security(address=from_addr)
                             result_goplus = data.to_dict()
@@ -164,26 +156,14 @@ async def monitor_api(params: MonitorInput):
                                     "hash": tx_hash,
                                     "from": from_addr,
                                     "to": to_addr,
-                                    "block": block_number,
+                                    "block": blk.number,
                                     "goplus_result": result_goplus
                                 }, to_email)
                             time.sleep(0.1)
                         except Exception as e:
                             print("GoPlus API 检查异常:", e)
 
-                        # 1. 原始交易数据（不做compact），用于保存到下载文件
-                        tx_detail_raw = {
-                            "hash": tx_hash,
-                            "from": from_addr,
-                            "to": to_addr if to_addr else None,
-                            "value": tx.value,
-                            "gas": tx.gas,
-                            "gasPrice": tx.gasPrice,
-                            "nonce": tx.nonce,
-                            "input": input_data
-                        }
-                        # 2. 精简版交易数据（compact），用于API返回的preview
-                        tx_detail_preview = {
+                        tx_simple = {
                             "hash": compact(tx_hash),
                             "from": compact(from_addr),
                             "to": compact(to_addr) if to_addr else None,
@@ -194,68 +174,50 @@ async def monitor_api(params: MonitorInput):
                             "input": compact(input_data)
                         }
 
+                        # TX模式和BLOCK模式都添加进来
                         if mode == "tx" and tx_collected < target_count:
-                            block_map[block_number]["txs"].append(tx_detail_raw)
-                            if len(preview_items) < 10:
-                                preview_items.append({
-                                    "number": block_number,
-                                    "timestamp": block_time,
-                                    "tx": tx_detail_preview
-                                })
+                            block_data["txs"].append(tx_simple)
                             tx_collected += 1
                             if tx_collected >= target_count:
-                                result_blocks = [block_map[bnum] for bnum in sorted(block_map.keys())]
+                                result_block = block_data
                                 filename = f"monitor_{int(time.time())}_{uuid.uuid4().hex}.json"
                                 filepath = f"/tmp/{filename}"
+                                # 保存全部交易
                                 with open(filepath, "w", encoding="utf-8") as f:
-                                    json.dump(result_blocks, f, ensure_ascii=False, indent=2)
+                                    json.dump(result_block, f, ensure_ascii=False, indent=2)
                                 download_url = f"/download/{filename}"
+                                # preview 格式与block一致
+                                preview = result_block.copy()
+                                preview["txs"] = preview["txs"][:10]
                                 return {
-                                    "mode": "tx",
-                                    "total_collected": tx_collected,
-                                    "preview": preview_items,
+                                    "number": preview["number"],
+                                    "timestamp": preview["timestamp"],
+                                    "tx_count": preview["tx_count"],
+                                    "txs": preview["txs"],
                                     "download_url": download_url
                                 }
                         elif mode == "block":
-                            block_map[block_number]["txs"].append(tx_detail_raw)
+                            block_data["txs"].append(tx_simple)
 
-                    if mode == "block" and len(block_map[block_number]["txs"]) > 0:
-                        if block_number not in [blk['number'] for blk in preview_items]:
-                            # 每个区块只预览一次，展示区块基本信息和前10条tx
-                            # 这里preview只compact前10条
-                            preview_block = {
-                                "number": block_number,
-                                "timestamp": block_time,
-                                "txs": [
-                                    {
-                                        "hash": compact(tx["hash"]),
-                                        "from": compact(tx["from"]),
-                                        "to": compact(tx["to"]) if tx["to"] else None,
-                                        "value": tx["value"],
-                                        "gas": tx["gas"],
-                                        "gasPrice": tx["gasPrice"],
-                                        "nonce": tx["nonce"],
-                                        "input": compact(tx["input"])
-                                    }
-                                    for tx in block_map[block_number]["txs"][:10]
-                                ]
-                            }
-                            preview_items.append(preview_block)
-                        block_collected = len(block_map)
+                    if mode == "block":
+                        block_collected += 1
                         if block_collected >= target_count:
-                            result_blocks = [block_map[bnum] for bnum in sorted(block_map.keys())]
                             filename = f"monitor_{int(time.time())}_{uuid.uuid4().hex}.json"
                             filepath = f"/tmp/{filename}"
                             with open(filepath, "w", encoding="utf-8") as f:
-                                json.dump(result_blocks, f, ensure_ascii=False, indent=2)
+                                json.dump(block_data, f, ensure_ascii=False, indent=2)
                             download_url = f"/download/{filename}"
+                            preview = block_data.copy()
+                            preview["txs"] = preview["txs"][:10]
                             return {
-                                "mode": "block",
-                                "total_collected": block_collected,
-                                "preview": preview_items,
+                                "number": preview["number"],
+                                "timestamp": preview["timestamp"],
+                                "tx_count": preview["tx_count"],
+                                "txs": preview["txs"],
                                 "download_url": download_url
                             }
     return {"error": "采集未成功"}
+
 
 @app.get("/download/{filename}")
 def download_file(filename: str):
