@@ -16,6 +16,7 @@ from email.mime.text import MIMEText
 from goplus.address import Address
 from dotenv import load_dotenv
 import uuid
+from collections import defaultdict
 
 load_dotenv()
 
@@ -102,10 +103,12 @@ async def monitor_api(params: MonitorInput):
     target_count = params.target_count
     to_email = params.to_email
 
-    all_txs = []
-    all_blocks = []
     tx_collected = 0
     block_collected = 0
+    block_map = {}  # 区块号 -> 区块信息
+
+    # 用于预览（前10条）
+    preview_items = []
 
     async with websockets.connect(ETH_WS, ping_interval=20, ping_timeout=10) as ws:
         await ws.send(json.dumps({
@@ -127,12 +130,14 @@ async def monitor_api(params: MonitorInput):
                 num = int(result["number"], 16)
                 blk = fetch_block_with_retry(num)
                 if blk:
-                    block_data = {
-                        "number": blk.number,
-                        "timestamp": to_beijing_time(blk.timestamp),
-                        "tx_count": len(blk.transactions),
-                        "txs": []
-                    }
+                    block_number = blk.number
+                    block_time = to_beijing_time(blk.timestamp)
+                    if block_number not in block_map:
+                        block_map[block_number] = {
+                            "number": block_number,
+                            "timestamp": block_time,
+                            "txs": []
+                        }
                     for tx in blk.transactions:
                         tx_hash = tx.hash.hex()
                         from_addr = tx['from'].lower()
@@ -148,7 +153,7 @@ async def monitor_api(params: MonitorInput):
                                 "from": from_addr,
                                 "to": to_addr,
                                 "value": value_eth,
-                                "block": blk.number
+                                "block": block_number
                             }, to_email)
 
                         # 风控2: GoPlus黑名单
@@ -161,58 +166,71 @@ async def monitor_api(params: MonitorInput):
                                     "hash": tx_hash,
                                     "from": from_addr,
                                     "to": to_addr,
-                                    "block": blk.number,
+                                    "block": block_number,
                                     "goplus_result": result_goplus
                                 }, to_email)
                             time.sleep(0.1)
                         except Exception as e:
                             print("GoPlus API 检查异常:", e)
 
-                        tx_simple = {
-                            "hash": compact(tx_hash),
-                            "from": compact(from_addr),
-                            "to": compact(to_addr) if to_addr else None,
+                        tx_detail = {
+                            "hash": tx_hash,
+                            "from": from_addr,
+                            "to": to_addr if to_addr else None,
                             "value": tx.value,
                             "gas": tx.gas,
                             "gasPrice": tx.gasPrice,
                             "nonce": tx.nonce,
-                            "input": compact(input_data)
+                            "input": input_data
                         }
                         if mode == "tx" and tx_collected < target_count:
-                            all_txs.append(tx_simple)
+                            block_map[block_number]["txs"].append(tx_detail)
+                            if len(preview_items) < 10:
+                                # 预览数据加区块信息
+                                preview_items.append({
+                                    "number": block_number,
+                                    "timestamp": block_time,
+                                    "tx": tx_detail
+                                })
                             tx_collected += 1
                             if tx_collected >= target_count:
-                                # 保存全部交易
+                                # 组装下载文件
+                                result_blocks = [block_map[bnum] for bnum in sorted(block_map.keys())]
                                 filename = f"monitor_{int(time.time())}_{uuid.uuid4().hex}.json"
                                 filepath = f"/tmp/{filename}"
                                 with open(filepath, "w", encoding="utf-8") as f:
-                                    json.dump(all_txs, f, ensure_ascii=False, indent=2)
+                                    json.dump(result_blocks, f, ensure_ascii=False, indent=2)
                                 download_url = f"/download/{filename}"
                                 return {
                                     "mode": "tx",
                                     "total_collected": tx_collected,
-                                    "preview": all_txs[:10],
+                                    "preview": preview_items,
                                     "download_url": download_url
                                 }
                         elif mode == "block":
-                            block_data["txs"].append(tx_simple)
+                            block_map[block_number]["txs"].append(tx_detail)
 
-                    if mode == "block" and len(block_data["txs"]) > 0:
-                        all_blocks.append(block_data)
-                        block_collected += 1
+                    if mode == "block" and len(block_map[block_number]["txs"]) > 0:
+                        if block_number not in [blk['number'] for blk in preview_items]:
+                            # 每个区块只预览一次，展示区块基本信息和前10条tx
+                            preview_block = {
+                                "number": block_number,
+                                "timestamp": block_time,
+                                "txs": block_map[block_number]["txs"][:10]
+                            }
+                            preview_items.append(preview_block)
+                        block_collected = len(block_map)
                         if block_collected >= target_count:
+                            result_blocks = [block_map[bnum] for bnum in sorted(block_map.keys())]
                             filename = f"monitor_{int(time.time())}_{uuid.uuid4().hex}.json"
                             filepath = f"/tmp/{filename}"
                             with open(filepath, "w", encoding="utf-8") as f:
-                                json.dump(all_blocks, f, ensure_ascii=False, indent=2)
+                                json.dump(result_blocks, f, ensure_ascii=False, indent=2)
                             download_url = f"/download/{filename}"
-                            # preview: 返回最后一个区块的前10条交易
-                            preview_block = block_data.copy()
-                            preview_block["txs"] = preview_block["txs"][:10]
                             return {
                                 "mode": "block",
                                 "total_collected": block_collected,
-                                "preview": preview_block,
+                                "preview": preview_items,
                                 "download_url": download_url
                             }
     return {"error": "采集未成功"}
